@@ -17,23 +17,13 @@ import android.graphics.drawable.GradientDrawable;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
-import android.net.ConnectivityManager;
-import android.net.Network;
-import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
 import android.net.Uri;
-import android.net.wifi.WifiInfo;
-import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
-import android.text.SpannableString;
-import android.text.Spanned;
-import android.text.TextPaint;
-import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -91,10 +81,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private TextView greeting;
     private TextView banner;
     private View btnInputs;
-    private TextView btnWifi;
     private TextView shamsiDate;
     private boolean shamsi;
-    private String vpnApp;
     private SpringAnimation springX, springY;
     private float glassTargetX, glassTargetY;
     // How far the grid has scrolled the glass. springY works without it, in grid content space, so a
@@ -133,18 +121,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private final Runnable dismissBanner = () -> banner.animate().alpha(0f).setDuration(220).start();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    /** Refreshes the network pill when the connection changes: at boot Wi-Fi often connects after Home is shown. */
-    private final ConnectivityManager.NetworkCallback networkCallback = new ConnectivityManager.NetworkCallback() {
-        @Override
-        public void onAvailable(@NonNull Network network) {
-            handler.post(MainActivity.this::updateWifiLabel);
-        }
-
-        @Override
-        public void onLost(@NonNull Network network) {
-            handler.post(MainActivity.this::updateWifiLabel);
-        }
-    };
     /** Shows the Inputs pill once the TV registers an input: at boot HDMI inputs can appear after Home is shown. */
     private final TvInputManager.TvInputCallback inputCallback = new TvInputManager.TvInputCallback() {
         @Override
@@ -155,18 +131,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         @Override
         public void onInputRemoved(String inputId) {
             updateInputsButton();
-        }
-    };
-    /** Listens for any VPN coming up or going down, even one this app's traffic is excluded from. */
-    private final ConnectivityManager.NetworkCallback vpnCallback = new ConnectivityManager.NetworkCallback() {
-        @Override
-        public void onAvailable(@NonNull Network network) {
-            handler.post(MainActivity.this::updateWifiLabel);
-        }
-
-        @Override
-        public void onLost(@NonNull Network network) {
-            handler.post(MainActivity.this::updateWifiLabel);
         }
     };
     private final IntentFilter packageFilter = new IntentFilter();
@@ -183,7 +147,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         @Override
         public void run() {
             updateGreeting();
-            updateWifiLabel();
             handler.postDelayed(this, MINUTE_MS);
         }
     };
@@ -216,7 +179,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 ambientGlow.setGradientRadius((r - l) * 0.62f));
         greeting = findViewById(R.id.greeting);
         banner = findViewById(R.id.banner);
-        btnWifi = findViewById(R.id.btnWifi);
         shamsiDate = findViewById(R.id.shamsiDate);
         shamsi = cfg.shamsiDate;
         if (shamsi) {
@@ -225,7 +187,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             date.setTextSize(11f);
             date.setPadding(0, (int) (4 * density), 0, 0);
         }
-        vpnApp = cfg.vpnApp;
         moduleCards = cfg.moduleCards;
         hiddenApps = new HashSet<>(cfg.hiddenApps);
 
@@ -286,11 +247,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         btnInputs = findViewById(R.id.btnInputs);
         View btnSettings = findViewById(R.id.btnSettings);
         btnInputs.setOnClickListener(v -> showInputs());
-        btnWifi.setOnClickListener(v -> openNetworkPill());
-        btnWifi.setOnLongClickListener(v -> {
-            open(new Intent(Settings.ACTION_WIFI_SETTINGS));
-            return true;
-        });
         btnSettings.setOnClickListener(v -> open(new Intent(Settings.ACTION_SETTINGS)));
         btnSettings.setOnLongClickListener(v -> {
             // One panel for both of ours: the hidden apps, and the module cards upstream put here.
@@ -303,15 +259,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         View.OnKeyListener pillKeys = (v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) return true;
-            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
-                // The left end is Inputs, or Wi-Fi on a box without inputs.
-                return v.getId() == R.id.btnInputs
-                        || (v.getId() == R.id.btnWifi && btnInputs.getVisibility() != View.VISIBLE);
-            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) return v.getId() == R.id.btnInputs;
             return keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && v.getId() == R.id.btnSettings;
         };
         btnInputs.setOnKeyListener(pillKeys);
-        btnWifi.setOnKeyListener(pillKeys);
         btnSettings.setOnKeyListener(pillKeys);
 
         // Hide the glass when focus leaves the tiles.
@@ -325,16 +276,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         packageFilter.addAction(Intent.ACTION_PACKAGE_CHANGED);
         packageFilter.addDataScheme("package");
 
-        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
         TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
         if (tim != null) tim.registerCallback(inputCallback, handler);
-        if (cm != null) {
-            cm.registerDefaultNetworkCallback(networkCallback);
-            cm.registerNetworkCallback(new NetworkRequest.Builder()
-                    .addTransportType(NetworkCapabilities.TRANSPORT_VPN)
-                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    .build(), vpnCallback);
-        }
     }
 
     /**
@@ -375,7 +318,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         promptsPaused = false;
         reloadApps(true);
         updateGreeting();
-        updateWifiLabel();
         updateInputsButton();
         handler.removeCallbacks(dismissBanner);
         banner.setAlpha(0f);
@@ -466,13 +408,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        ConnectivityManager cm = getSystemService(ConnectivityManager.class);
         TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
         if (tim != null) tim.unregisterCallback(inputCallback);
-        if (cm != null) {
-            cm.unregisterNetworkCallback(networkCallback);
-            cm.unregisterNetworkCallback(vpnCallback);
-        }
     }
 
     @Override
@@ -850,10 +787,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     }
 
     private void focusTile(int position) {
-        if (adapter.getItemCount() == 0) {
-            btnWifi.requestFocus();
-            return;
-        }
+        if (adapter.getItemCount() == 0) return;
         final int pos = Math.max(0, Math.min(position, adapter.getItemCount() - 1));
         RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(pos);
         if (vh != null) {
@@ -889,73 +823,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         else res = R.string.good_night;
         greeting.setText(res);
         if (shamsi) shamsiDate.setText(Shamsi.today());
-    }
-
-    /** Shows the Wi-Fi network name on the button when we can read it, otherwise the connection type. */
-    private void updateWifiLabel() {
-        String text = getString(R.string.wifi);
-        boolean vpn = false, online = false;
-        int icon = R.drawable.ic_wifi;
-        try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            boolean wifi = false, ethernet = false;
-            // All networks, not just the active one: with a VPN up the active network is the VPN itself.
-            for (Network net : cm != null ? cm.getAllNetworks() : new Network[0]) {
-                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
-                if (caps == null) continue;
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
-                    vpn = true;
-                    continue;
-                }
-                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue;
-                online = true;
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) ethernet = true;
-                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) wifi = true;
-            }
-            if (!online) {
-                text = getString(R.string.offline);
-                vpn = false;
-            } else if (ethernet) {
-                text = getString(R.string.ethernet);
-                icon = R.drawable.ic_ethernet;
-            } else if (wifi) {
-                WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-                WifiInfo info = wm != null ? wm.getConnectionInfo() : null;
-                String ssid = info != null ? info.getSSID() : null;
-                if (ssid != null) {
-                    ssid = ssid.replace("\"", "").trim();
-                    if (!ssid.isEmpty() && !ssid.contains("unknown") && !ssid.equals("0x")) text = ssid;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        // With a VPN app configured, a VPN that is down matters too: show a red "VPN off" capsule then.
-        boolean vpnDown = !vpn && online && !vpnApp.isEmpty();
-        if (vpn || vpnDown) {
-            // Network name, then the green lock-and-VPN (or red "VPN off") capsule drawn in place of the word.
-            String badge = getString(vpn ? R.string.vpn : R.string.vpn_off);
-            VpnBadge span = new VpnBadge(vpn ? getDrawable(R.drawable.ic_lock) : null, density);
-            // The pill has a maximum width and ellipsizes at the end, which would cut the badge off after
-            // a long network name, so shorten the name to whatever room the badge leaves. The total paddings
-            // include the Wi-Fi icon.
-            TextPaint paint = btnWifi.getPaint();
-            float room = btnWifi.getMaxWidth() - btnWifi.getTotalPaddingStart() - btnWifi.getTotalPaddingEnd()
-                    - span.getSize(paint, badge, 0, badge.length(), null) - paint.measureText(" ") - 2 * density;
-            text = TextUtils.ellipsize(text, paint, Math.max(0, room), TextUtils.TruncateAt.END).toString();
-            SpannableString label = new SpannableString(text + " " + badge);
-            label.setSpan(span, text.length() + 1, label.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            btnWifi.setText(label);
-        } else {
-            btnWifi.setText(text);
-        }
-        btnWifi.setCompoundDrawablesRelativeWithIntrinsicBounds(icon, 0, 0, 0);
-    }
-
-    /** The network pill opens the VPN app when one is configured and installed, otherwise Wi-Fi settings. */
-    private void openNetworkPill() {
-        Intent i = vpnApp.isEmpty() ? null : getPackageManager().getLeanbackLaunchIntentForPackage(vpnApp);
-        if (i == null && !vpnApp.isEmpty()) i = getPackageManager().getLaunchIntentForPackage(vpnApp);
-        open(i != null ? i : new Intent(Settings.ACTION_WIFI_SETTINGS));
     }
 
     /** Hides the Inputs pill when it would have nothing to list: streaming boxes have no HDMI-in, AV or tuner. */

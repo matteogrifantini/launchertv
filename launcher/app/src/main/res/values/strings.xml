@@ -51,9 +51,11 @@
     <string name="hide">Hide</string>
     <string name="move">Move</string>
     <string name="app_details">App details</string>
+    <string name="cancel">Cancel</string>
     <string name="hidden_toast">%1$s hidden — long-press Settings to restore it</string>
     <string name="restored_toast">%1$s is back</string>
     <string name="hidden_apps_header">Hidden apps</string>
+    <string name="hidden_apps_title">Hidden apps — select to restore</string>
     <string name="hidden_apps_empty">No hidden apps</string>
     <string name="move_hint">Arranging — arrows move · OK saves · Back cancels</string>
     <string name="move_saved">Order saved</string>

@@ -51,9 +51,11 @@
     <string name="hide">Nascondi</string>
     <string name="move">Sposta</string>
     <string name="app_details">Dettagli app</string>
+    <string name="cancel">Annulla</string>
     <string name="hidden_toast">%1$s nascosta — tieni premuto su Impostazioni per ripristinarla</string>
     <string name="restored_toast">%1$s è tornata</string>
     <string name="hidden_apps_header">App nascoste</string>
+    <string name="hidden_apps_title">App nascoste — seleziona per ripristinare</string>
     <string name="hidden_apps_empty">Nessuna app nascosta</string>
     <string name="move_hint">Riordino — le frecce spostano · OK salva · Indietro annulla</string>
     <string name="move_saved">Ordine salvato</string>
