@@ -1,9 +1,9 @@
 package com.gathin.tvhome;
 
-import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
@@ -11,9 +11,8 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Outline;
 import android.graphics.Rect;
+import android.graphics.drawable.AdaptiveIconDrawable;
 import android.graphics.drawable.Drawable;
-import android.net.Uri;
-import android.provider.Settings;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -35,8 +34,10 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * App tiles. The first {@link MainActivity#COLUMNS} positions are the pinned dock (favourites, fixed order),
- * the rest is alphabetical.
+ * App tiles. The first positions are the dock (the user's own order first, then the config list),
+ * the grid after it: the arrangement the user saved by hand (long-press → Move) first, untouched
+ * apps after it, alphabetical. Hidden apps (config list, or the user's own hides) are left out;
+ * the restore panel lists them all.
  */
 public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
@@ -45,6 +46,9 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
         /** Called for D-pad Up/Down on a tile. Return true when handled. */
         boolean onTileVerticalKey(int position, int keyCode);
+
+        /** Called when OK is held on a tile: hide / move / app details menu. */
+        void onTileLongPress(int position);
     }
 
     static final class Entry {
@@ -53,18 +57,30 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         final String pkg;
         final Drawable banner;
         final Drawable icon;
+        /** Square artwork used as a banner (e.g. SportzX): show all of it instead of cropping it. */
+        final boolean fitBanner;
+        /** Edge colour of a fitted banner, so the tile's side bars blend with the artwork. */
+        final int bannerFill;
         int ambient;
 
-        Entry(String label, ComponentName component, Drawable banner, Drawable icon) {
+        Entry(String label, ComponentName component, Drawable banner, Drawable icon, boolean fitBanner) {
             this.label = label;
             this.component = component;
             this.pkg = component.getPackageName();
             this.banner = banner;
             this.icon = icon;
+            this.fitBanner = fitBanner;
+            this.bannerFill = fitBanner ? edgeColor(banner) : 0;
         }
     }
 
     static final float FOCUS_SCALE = 1.10f;
+
+    private static final String PREFS = "tvhome";
+    private static final String PREF_HIDDEN = "hidden";
+    private static final String PREF_SHOWN = "shown";
+    private static final String PREF_ORDER = "order";
+    private static final String PREF_DOCK_ORDER = "dock_order";
 
     private final Context ctx;
     private final TileListener listener;
@@ -74,6 +90,18 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
     /** Never shown as tiles (res/values/config.xml, hidden_apps). */
     private final Set<String> hidden;
     private final List<Entry> items = new ArrayList<>();
+    /** Every launchable app, hidden ones included: what the restore dialog lists. */
+    private final List<Entry> all = new ArrayList<>();
+    /** Apps the user hid (tile menu → Hide); wins over the config list. */
+    private final Set<String> userHidden = new HashSet<>();
+    /** Apps the user brought back that the config list hides. */
+    private final Set<String> userShown = new HashSet<>();
+    /** Grid arrangement the user saved by hand; apps never moved come after it, alphabetical. */
+    private final List<String> order = new ArrayList<>();
+    /** Dock arrangement the user saved by hand; falls back to the config order for the rest. */
+    private final List<String> dockOrder = new ArrayList<>();
+    /** Items in the dock row (the present favourites); the grid starts at this index. */
+    private int dockCount;
 
     AppAdapter(Context ctx, TileListener listener, int dockSize) {
         this.ctx = ctx;
@@ -87,32 +115,112 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
     }
 
     void reload() {
+        SharedPreferences sp = prefs();
+        userHidden.clear();
+        userHidden.addAll(sp.getStringSet(PREF_HIDDEN, Collections.emptySet()));
+        userShown.clear();
+        userShown.addAll(sp.getStringSet(PREF_SHOWN, Collections.emptySet()));
+        order.clear();
+        for (String s : sp.getString(PREF_ORDER, "").split("\n")) {
+            if (!s.isEmpty()) order.add(s);
+        }
+        dockOrder.clear();
+        for (String s : sp.getString(PREF_DOCK_ORDER, "").split("\n")) {
+            if (!s.isEmpty()) dockOrder.add(s);
+        }
+
         PackageManager pm = ctx.getPackageManager();
         Intent probe = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
         List<ResolveInfo> found = pm.queryIntentActivities(probe, 0);
         List<Entry> fresh = new ArrayList<>();
+        all.clear();
         for (ResolveInfo ri : found) {
             if (ri.activityInfo == null) continue;
             String pkg = ri.activityInfo.packageName;
-            if (pkg.equals(ctx.getPackageName()) || hidden.contains(pkg)) continue;
+            if (pkg.equals(ctx.getPackageName())) continue;
             Drawable banner = ri.activityInfo.loadBanner(pm);
             if (banner == null) banner = ri.activityInfo.applicationInfo.loadBanner(pm);
+            boolean fitBanner = banner != null && bannerNeedsFit(banner);
             Drawable icon = ri.loadIcon(pm);
             String label = String.valueOf(ri.loadLabel(pm));
-            fresh.add(new Entry(label, new ComponentName(pkg, ri.activityInfo.name), banner, icon));
+            Entry e = new Entry(label, new ComponentName(pkg, ri.activityInfo.name), banner, icon, fitBanner);
+            all.add(e);
+            boolean visible = !hidden.contains(pkg) || userShown.contains(pkg);   // config hides, undone
+            if (!visible || userHidden.contains(pkg)) continue;
+            fresh.add(e);
         }
         Collections.sort(fresh, (a, b) -> {
-            int fa = favourites.indexOf(a.pkg), fb = favourites.indexOf(b.pkg);
+            int fa = dockRank(a.pkg), fb = dockRank(b.pkg);
             if (fa >= 0 || fb >= 0) {
                 if (fa < 0) return 1;
                 if (fb < 0) return -1;
                 return Integer.compare(fa, fb);
             }
+            int oa = order.indexOf(a.pkg), ob = order.indexOf(b.pkg);
+            if (oa >= 0 || ob >= 0) {
+                if (oa < 0) return 1;
+                if (ob < 0) return -1;
+                return Integer.compare(oa, ob);
+            }
             return a.label.compareToIgnoreCase(b.label);
         });
         items.clear();
         items.addAll(fresh);
+        dockCount = 0;
+        for (Entry e : items) {
+            if (favourites.indexOf(e.pkg) < 0) break;
+            dockCount++;
+        }
         notifyDataSetChanged();
+    }
+
+    /** Position in the dock: the user's own arrangement first, the config list after it. */
+    private int dockRank(String pkg) {
+        int i = dockOrder.indexOf(pkg);
+        if (i >= 0) return i;
+        int j = favourites.indexOf(pkg);
+        return j < 0 ? -1 : dockOrder.size() + j;
+    }
+
+    /**
+     * Square artwork used as a banner (adaptive icons, e.g. SportzX) would fill a 16:9 tile as one
+     * huge crop; fit it inside the tile instead, so the whole logo is visible.
+     */
+    private static boolean bannerNeedsFit(Drawable d) {
+        if (d instanceof AdaptiveIconDrawable) return true;
+        int w = d.getIntrinsicWidth(), h = d.getIntrinsicHeight();
+        return w > 0 && h > 0 && w < h * 1.4f;
+    }
+
+    /**
+     * Colour along the edges of a fitted banner: the tile's side bars then blend into the artwork
+     * instead of showing as borders (SportzX: white edges → a full white tile, logo centred).
+     */
+    private static int edgeColor(Drawable live) {
+        if (live == null) return 0;
+        Drawable d = live.getConstantState() != null ? live.getConstantState().newDrawable().mutate() : live;
+        Rect saved = new Rect(d.getBounds());
+        int n = 24;
+        Bitmap bmp = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(bmp);
+        d.setBounds(0, 0, n, n);
+        d.draw(c);
+        d.setBounds(saved);
+        long a = 0, r = 0, g = 0, b = 0;
+        int count = 0;
+        for (int y : new int[]{1, n - 2}) {
+            for (int x : new int[]{1, n - 2}) {
+                int p = bmp.getPixel(x, y);
+                a += Color.alpha(p);
+                r += Color.red(p);
+                g += Color.green(p);
+                b += Color.blue(p);
+                count++;
+            }
+        }
+        bmp.recycle();
+        if (a / count < 200) return 0;   // see-through edges: keep the tile background
+        return Color.rgb((int) (r / count), (int) (g / count), (int) (b / count));
     }
 
     @NonNull
@@ -132,6 +240,8 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         h.card.setScaleX(focused ? FOCUS_SCALE : 1f);
         h.card.setScaleY(focused ? FOCUS_SCALE : 1f);
         if (e.banner != null) {
+            h.banner.setScaleType(e.fitBanner ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+            h.banner.setBackgroundColor(e.bannerFill);
             h.banner.setImageDrawable(e.banner);
             h.banner.setVisibility(View.VISIBLE);
             h.icon.setVisibility(View.GONE);
@@ -146,12 +256,9 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         }
         h.card.setOnClickListener(v -> launch(e));
         h.card.setOnLongClickListener(v -> {
-            Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + e.pkg));
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            try {
-                ctx.startActivity(i);
-            } catch (ActivityNotFoundException ignored) {
-            }
+            int pos = h.getBindingAdapterPosition();
+            if (pos == RecyclerView.NO_POSITION) return false;
+            listener.onTileLongPress(pos);
             return true;
         });
     }
@@ -194,6 +301,74 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
     String labelAt(int position) {
         return position >= 0 && position < items.size() ? items.get(position).label : "";
+    }
+
+    String pkgAt(int position) {
+        return position >= 0 && position < items.size() ? items.get(position).pkg : null;
+    }
+
+    /** Items in the dock row: the grid starts at this index. */
+    int dockCount() {
+        return dockCount;
+    }
+
+    /** Moves a tile inside its own section (dock or grid); true when something moved. */
+    boolean move(int from, int to) {
+        if (from == to || from < 0 || to < 0) return false;
+        if (from >= items.size() || to >= items.size()) return false;
+        if ((from < dockCount) != (to < dockCount)) return false;   // never across dock and grid
+        items.add(to, items.remove(from));
+        notifyItemMoved(from, to);
+        return true;
+    }
+
+    /** Saves the current arrangement of both the dock and the grid as the user's own order. */
+    void persistOrder() {
+        StringBuilder dock = new StringBuilder();
+        StringBuilder grid = new StringBuilder();
+        for (int i = 0; i < items.size(); i++) {
+            StringBuilder sb = i < dockCount ? dock : grid;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(items.get(i).pkg);
+        }
+        prefs().edit().putString(PREF_DOCK_ORDER, dock.toString())
+                .putString(PREF_ORDER, grid.toString()).apply();
+    }
+
+    void hidePackage(String pkg) {
+        SharedPreferences sp = prefs();
+        Set<String> h = new HashSet<>(sp.getStringSet(PREF_HIDDEN, Collections.emptySet()));
+        h.add(pkg);
+        Set<String> shown = new HashSet<>(sp.getStringSet(PREF_SHOWN, Collections.emptySet()));
+        shown.remove(pkg);   // hiding beats an earlier "bring back"
+        sp.edit().putStringSet(PREF_HIDDEN, h).putStringSet(PREF_SHOWN, shown).apply();
+        reload();
+    }
+
+    void restorePackage(String pkg) {
+        SharedPreferences sp = prefs();
+        Set<String> h = new HashSet<>(sp.getStringSet(PREF_HIDDEN, Collections.emptySet()));
+        h.remove(pkg);
+        Set<String> shown = new HashSet<>(sp.getStringSet(PREF_SHOWN, Collections.emptySet()));
+        shown.add(pkg);      // beats the config list too (an app the launcher ships hidden)
+        sp.edit().putStringSet(PREF_HIDDEN, h).putStringSet(PREF_SHOWN, shown).apply();
+        reload();
+    }
+
+    /** Launchable apps currently not shown, for the restore dialog. */
+    List<Entry> hiddenEntries() {
+        Set<String> visible = new HashSet<>();
+        for (Entry e : items) visible.add(e.pkg);
+        List<Entry> out = new ArrayList<>();
+        for (Entry e : all) {
+            if (!visible.contains(e.pkg)) out.add(e);
+        }
+        Collections.sort(out, (a, b) -> a.label.compareToIgnoreCase(b.label));
+        return out;
+    }
+
+    private SharedPreferences prefs() {
+        return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
     /** A vivid colour sampled from the app's banner (or icon), cached per entry. */

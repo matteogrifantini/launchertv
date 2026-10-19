@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="inputs">Ingressi</string>
+    <string name="settings">Impostazioni</string>
+    <string name="choose_input">Ingressi</string>
+    <string name="connected">Connesso</string>
+    <string name="standby">Standby</string>
+    <string name="not_connected">Nessun dispositivo</string>
+    <string name="live_tv">Canali TV</string>
+    <string name="no_inputs">Nessun ingresso trovato</string>
+    <string name="good_morning">Buongiorno</string>
+    <string name="good_afternoon">Buon pomeriggio</string>
+    <string name="good_evening">Buonasera</string>
+    <string name="good_night">Buonanotte</string>
+    <string name="offline">Non in linea</string>
+    <string name="not_available">Non disponibile su questa TV</string>
+    <string name="cant_open">Impossibile aprire %1$s</string>
+    <string name="dream_name">Orologio</string>
+    <!-- Menu pressione prolungata, modalità spostamento, app nascoste. -->
+    <string name="hide">Nascondi</string>
+    <string name="move">Sposta</string>
+    <string name="app_details">Dettagli app</string>
+    <string name="cancel">Annulla</string>
+    <string name="hidden_toast">%1$s nascosta — tieni premuto su Impostazioni per ripristinarla</string>
+    <string name="restored_toast">%1$s è di nuovo qui</string>
+    <string name="hidden_apps_title">App nascoste — seleziona per ripristinare</string>
+    <string name="hidden_apps_empty">Nessuna app nascosta</string>
+    <string name="move_hint">Riordino — frecce: muovi · OK: salva · Indietro: annulla</string>
+    <string name="move_saved">Ordine salvato</string>
+    <string name="move_cancelled">Ordine ripristinato</string>
+    <string name="hidden_apps_header">App nascoste</string>
+    <string name="restore">Ripristina</string>
+</resources>
