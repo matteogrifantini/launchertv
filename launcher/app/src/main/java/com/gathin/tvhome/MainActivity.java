@@ -459,6 +459,24 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // Home screen: Back goes nowhere.
     }
 
+    // ---- tile menu -------------------------------------------------------------------------------
+
+    /** OK held on a tile. Replaced by the hide / move / app details panel further down the branch. */
+    @Override
+    public void onTileLongPress(int position) {
+        String pkg = adapter.pkgAt(position);
+        if (pkg != null) openAppDetails(pkg);
+    }
+
+    private void openAppDetails(String pkg) {
+        Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg));
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(i);
+        } catch (ActivityNotFoundException ignored) {
+        }
+    }
+
     // ---- glass highlight -------------------------------------------------------------------------
 
     @Override
