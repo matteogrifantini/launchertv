@@ -12,6 +12,7 @@ import android.content.pm.ApplicationInfo;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
@@ -27,6 +28,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.SpannableString;
 import android.text.Spanned;
@@ -87,6 +89,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private int ambientColor;
     private boolean heroShown;
     private TextView greeting;
+    private TextView banner;
     private View btnInputs;
     private TextView btnWifi;
     private TextView shamsiDate;
@@ -116,6 +119,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private boolean promptsPaused;
     /** The Inputs or Module cards dropdown while one is open, so onPause can close it. */
     private PopupWindow openPopup;
+    /** The ambient backdrop is up, so the next tile keeps it and only swaps its colour. */
+    private boolean ambientShown;
+    /** Arranging mode: adapter position of the tile travelling with the arrows, or -1. */
+    private int movingPos = -1;
+    /** Bumped on every step and on exit, so a pending highlight re-glue from an older step is ignored. */
+    private int moveGen;
+    /** When the last arrangement was saved, so a held OK does not reopen the menu right after. */
+    private long moveConfirmedAt;
+    /** When the open panel appeared; clicks arriving right after are remote bounces, not choices. */
+    private long panelShownAt;
+
+    private final Runnable dismissBanner = () -> banner.animate().alpha(0f).setDuration(220).start();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     /** Refreshes the network pill when the connection changes: at boot Wi-Fi often connects after Home is shown. */
@@ -200,6 +215,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         ambient.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) ->
                 ambientGlow.setGradientRadius((r - l) * 0.62f));
         greeting = findViewById(R.id.greeting);
+        banner = findViewById(R.id.banner);
         btnWifi = findViewById(R.id.btnWifi);
         shamsiDate = findViewById(R.id.shamsiDate);
         shamsi = cfg.shamsiDate;
@@ -277,8 +293,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         });
         btnSettings.setOnClickListener(v -> open(new Intent(Settings.ACTION_SETTINGS)));
         btnSettings.setOnLongClickListener(v -> {
-            if (!moduleCards) return false;   // off: a long press does nothing, as before the feature
-            showModuleCards();
+            // One panel for both of ours: the hidden apps, and the module cards upstream put here.
+            showSettingsMenu();
             return true;
         });
 
@@ -361,6 +377,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         updateGreeting();
         updateWifiLabel();
         updateInputsButton();
+        handler.removeCallbacks(dismissBanner);
+        banner.setAlpha(0f);
         handler.postDelayed(minuteTick, MINUTE_MS);
     }
 
@@ -370,12 +388,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         final String returnKey = lastFocusedKey;
         final int returnSlot = lastFocused;
         final boolean restoreFocus = animate || grid.hasFocus();
+        movingPos = -1;
+        moveGen++;
         if (restoreFocus) {
             glassShown = false;
             glass.setAlpha(0f);
             heroShown = false;
             heroName.setAlpha(0f);
             ambient.setAlpha(0f);
+            ambientShown = false;
         }
         reloadTiles();
         if (animate) grid.scheduleLayoutAnimation();
@@ -459,13 +480,92 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // Home screen: Back goes nowhere.
     }
 
-    // ---- tile menu -------------------------------------------------------------------------------
+    // ---- tile menu: hide, move, app details ------------------------------------------------------
 
-    /** OK held on a tile. Replaced by the hide / move / app details panel further down the branch. */
     @Override
     public void onTileLongPress(int position) {
-        String pkg = adapter.pkgAt(position);
-        if (pkg != null) openAppDetails(pkg);
+        // Already arranging (OK is the confirm key then), or a held OK right after saving.
+        if (movingPos >= 0 || SystemClock.uptimeMillis() - moveConfirmedAt < 800) return;
+        final String pkg = adapter.pkgAt(position);
+        if (pkg == null) return;
+        final String label = adapter.labelAt(position);
+        View panel = getLayoutInflater().inflate(R.layout.popup_menu, root, false);
+        ((TextView) panel.findViewById(R.id.header)).setText(label);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+
+        addMenuRow(rows, R.drawable.ic_hide, getString(R.string.hide), () -> {
+            adapter.hidePackage(pkg);
+            reloadApps(true);
+            showBanner(getString(R.string.hidden_toast, label), 5000);
+        });
+        boolean inDock = position < adapter.dockCount();
+        if (inDock ? adapter.dockCount() > 1 : adapter.getItemCount() - adapter.dockCount() > 1) {
+            addMenuRow(rows, R.drawable.ic_move, getString(R.string.move), () -> startMove(position));
+        }
+        addMenuRow(rows, R.drawable.ic_info, getString(R.string.app_details), () -> openAppDetails(pkg));
+
+        View card = cardAt(position);
+        showPanel(panel, rows, card != null ? card : grid, card);
+    }
+
+    private View cardAt(int position) {
+        RecyclerView.ViewHolder vh = grid.findViewHolderForItemId(adapter.getItemId(position));
+        if (vh == null) vh = grid.findViewHolderForAdapterPosition(position);
+        return vh != null ? vh.itemView.findViewById(R.id.card) : null;
+    }
+
+    private void addMenuRow(LinearLayout rows, int iconRes, String title, Runnable action) {
+        View row = getLayoutInflater().inflate(R.layout.item_row, rows, false);
+        ImageView icon = row.findViewById(R.id.icon);
+        icon.setImageResource(iconRes);
+        icon.setImageTintList(androidx.core.content.ContextCompat.getColorStateList(this, R.color.panel_icon_tint));
+        ((TextView) row.findViewById(R.id.title)).setText(title);
+        row.setTag(action);
+        rows.addView(row);
+    }
+
+    private void addAppRow(LinearLayout rows, Drawable icon, String title, Runnable action) {
+        View row = getLayoutInflater().inflate(R.layout.item_row, rows, false);
+        ((ImageView) row.findViewById(R.id.icon)).setImageDrawable(icon);
+        ((TextView) row.findViewById(R.id.title)).setText(title);
+        TextView trailing = row.findViewById(R.id.trailing);
+        trailing.setText(R.string.restore);
+        trailing.setVisibility(View.VISIBLE);
+        row.setTag(action);
+        rows.addView(row);
+    }
+
+    /**
+     * One of the launcher's glass panels, dropped from its anchor; rows act on OK, Back closes.
+     * The height is capped so a long list (hidden apps) scrolls instead of running off the screen.
+     */
+    private void showPanel(View panel, LinearLayout rows, View anchor, View returnFocus) {
+        for (int i = 0; i < rows.getChildCount(); i++) {
+            View row = rows.getChildAt(i);
+            final Runnable action = (Runnable) row.getTag();
+            // The OK press that opened this panel can leak a click when it is released: swallow a
+            // key-up whose press started before the panel appeared. A fresh press selects normally.
+            row.setOnKeyListener((v, keyCode, event) ->
+                    event.getAction() == KeyEvent.ACTION_UP && event.getDownTime() < panelShownAt);
+            row.setOnClickListener(v -> {
+                if (openPopup != null) openPopup.dismiss();
+                action.run();
+            });
+        }
+        panel.measure(View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int width = Math.min(Math.max(panel.getMeasuredWidth(), (int) (260 * density)), (int) (480 * density));
+        int height = Math.min(panel.getMeasuredHeight(), (int) (430 * density));
+        PopupWindow popup = glassPopup(panel, width);
+        popup.setHeight(height);
+        // A popup takes one dismiss listener, and glassPopup's own only forgets the popup: focus is ours.
+        popup.setOnDismissListener(() -> {
+            if (openPopup == popup) openPopup = null;
+            if (returnFocus != null) returnFocus.requestFocus();
+        });
+        panelShownAt = SystemClock.uptimeMillis();
+        dropIn(popup, panel, anchor, Gravity.START);
+        if (rows.getChildCount() > 0) rows.getChildAt(0).requestFocus();
     }
 
     private void openAppDetails(String pkg) {
@@ -475,6 +575,142 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             startActivity(i);
         } catch (ActivityNotFoundException ignored) {
         }
+    }
+
+    // ---- arranging: the tile travels with the arrows ---------------------------------------------
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        // Arranging mode owns the D-pad: arrows slide the tile, OK saves, Back puts it back.
+        if (movingPos >= 0 && event.getAction() == KeyEvent.ACTION_DOWN) {
+            switch (event.getKeyCode()) {
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                    return moveStep(-1);
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    return moveStep(1);
+                case KeyEvent.KEYCODE_DPAD_UP:
+                    return moveStep(-COLUMNS);
+                case KeyEvent.KEYCODE_DPAD_DOWN:
+                    return moveStep(COLUMNS);
+                case KeyEvent.KEYCODE_DPAD_CENTER:
+                case KeyEvent.KEYCODE_ENTER:
+                case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                    confirmMove();
+                    return true;
+                case KeyEvent.KEYCODE_BACK:
+                    cancelMove();
+                    return true;
+                default:
+                    break;
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    /** The tile travels with the arrows; OK keeps the order, Back restores the saved one. */
+    private void startMove(int position) {
+        movingPos = position;
+        showBanner(getString(R.string.move_hint), 0);   // stays up until the arrangement ends
+    }
+
+    private boolean moveStep(int delta) {
+        int target = movingPos + delta;
+        int dock = adapter.dockCount();
+        boolean inDock = movingPos < dock;
+        if (target >= (inDock ? 0 : dock) && target < (inDock ? dock : adapter.getItemCount())
+                && adapter.move(movingPos, target)) {
+            movingPos = target;
+            glueHighlight();
+        }
+        return true;   // the key belongs to arranging, never to focus navigation
+    }
+
+    /**
+     * The focused tile keeps its focus while it moves, so no focus-change event fires and the glass
+     * highlight would stay where the tile used to be. Re-glue it to the tile: once now (in case the
+     * view lost focus in the move) and once after the grid has laid out its new positions.
+     */
+    private void glueHighlight() {
+        final int pos = movingPos;
+        final int gen = ++moveGen;
+        grid.post(() -> {
+            if (gen == moveGen) focusTile(pos);
+        });
+        grid.postDelayed(() -> {
+            if (gen == moveGen) focusTile(pos);
+        }, 90);
+    }
+
+    private void confirmMove() {
+        adapter.persistOrder();
+        movingPos = -1;
+        moveGen++;
+        moveConfirmedAt = SystemClock.uptimeMillis();
+        showBanner(getString(R.string.move_saved), 2400);
+    }
+
+    private void cancelMove() {
+        String key = adapter.keyAt(movingPos);
+        movingPos = -1;
+        moveGen++;
+        reloadApps(true);   // the saved order is back
+        showBanner(getString(R.string.move_cancelled), 2400);
+        grid.post(() -> {
+            int pos = adapter.positionOf(key);
+            focusTile(pos >= 0 ? pos : 0);
+        });
+    }
+
+    // ---- hidden apps: bring one back -------------------------------------------------------------
+
+    /** OK held on the Settings pill: the apps the launcher is not showing, and the module cards. */
+    private void showSettingsMenu() {
+        View panel = getLayoutInflater().inflate(R.layout.popup_menu, root, false);
+        ((TextView) panel.findViewById(R.id.header)).setText(R.string.app_name);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        if (!adapter.hiddenEntries().isEmpty()) {
+            addMenuRow(rows, R.drawable.ic_hide, getString(R.string.hidden_apps_header), this::showHiddenApps);
+        }
+        if (moduleCards) {
+            addMenuRow(rows, R.drawable.ic_settings, getString(R.string.module_cards), this::showModuleCards);
+        }
+        if (rows.getChildCount() == 0) {
+            showBanner(getString(R.string.hidden_apps_empty), 2400);
+            return;
+        }
+        View settings = findViewById(R.id.btnSettings);
+        showPanel(panel, rows, settings, settings);
+    }
+
+    private void showHiddenApps() {
+        List<AppAdapter.Entry> hiddenApps = adapter.hiddenEntries();
+        if (hiddenApps.isEmpty()) {
+            showBanner(getString(R.string.hidden_apps_empty), 2400);
+            return;
+        }
+        View panel = getLayoutInflater().inflate(R.layout.popup_menu, root, false);
+        ((TextView) panel.findViewById(R.id.header)).setText(getString(R.string.hidden_apps_header));
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        for (AppAdapter.Entry e : hiddenApps) {
+            addAppRow(rows, e.banner != null ? e.banner : e.icon, e.label, () -> {
+                adapter.restorePackage(e.pkg);
+                reloadApps(true);
+                showBanner(getString(R.string.restored_toast, e.label), 2400);
+            });
+        }
+        View settings = findViewById(R.id.btnSettings);
+        showPanel(panel, rows, settings, settings);
+    }
+
+    // ---- status banner (instead of toasts) -------------------------------------------------------
+
+    /** A glass line under the top bar: arranging hint, saved/cancelled, hidden/restored app. */
+    private void showBanner(CharSequence text, long stayMs) {
+        banner.setText(text);
+        handler.removeCallbacks(dismissBanner);
+        banner.animate().cancel();
+        banner.animate().alpha(1f).setDuration(180).start();
+        if (stayMs > 0) handler.postDelayed(dismissBanner, stayMs);
     }
 
     // ---- glass highlight -------------------------------------------------------------------------
@@ -513,14 +749,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             springY.animateToFinalPosition(y - glassScrollShift);
         }
         View item = (View) card.getParent();
-        if (position < COLUMNS) {
+        if (position < adapter.dockCount()) {
             // Dock: park it at the bottom of the screen and show the top shelf for this app.
             int decoratedTop = item.getTop() - (int) (6 * density);
             int dy = decoratedTop - grid.getPaddingTop();
             if (Math.abs(dy) > 1) grid.smoothScrollBy(0, dy);
             showHero(position, r.top - dy);
         } else {
+            // Grid: no top shelf, but the backdrop takes the app's colour just like the dock.
             hideHero();
+            showAmbient(adapter.ambientColorAt(position));
             // Scroll just enough so the whole glass (not only the tile) is visible.
             Rect want = new Rect(0, -(int) pad * 2, item.getWidth(), item.getHeight() + (int) pad);
             grid.requestChildRectangleOnScreen(item, want, false);
@@ -531,17 +769,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     private void showHero(int position, float dockTopInRoot) {
         String label = adapter.labelAt(position);
-        int color = adapter.ambientColorAt(position);
         float y = dockTopInRoot - 14 * density - 26 * density - heroName.getHeight();
         boolean changed = !label.contentEquals(heroName.getText());
+        showAmbient(adapter.ambientColorAt(position));
 
         if (!heroShown) {
             heroName.setText(label);
             heroName.setY(y);
             heroName.setTranslationX(0f);
             heroName.animate().alpha(1f).setDuration(260).start();
-            setAmbient(color);
-            ambient.animate().alpha(1f).setDuration(600).start();
             heroShown = true;
         } else if (changed) {
             heroName.animate().alpha(0f).translationX(-12 * density).setDuration(120).withEndAction(() -> {
@@ -550,14 +786,22 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 heroName.setTranslationX(12 * density);
                 heroName.animate().alpha(1f).translationX(0f).setDuration(200).start();
             }).start();
-            if (color != ambientColor) {
-                ambient.animate().alpha(0.35f).setDuration(200).withEndAction(() -> {
-                    setAmbient(color);
-                    ambient.animate().alpha(1f).setDuration(500).start();
-                }).start();
-            }
         } else {
             heroName.setY(y);
+        }
+    }
+
+    /** Backdrop glow in the app's colour: dock tiles and grid tiles alike (the top shelf text is dock-only). */
+    private void showAmbient(int color) {
+        if (!ambientShown) {
+            setAmbient(color);
+            ambient.animate().alpha(1f).setDuration(600).start();
+            ambientShown = true;
+        } else if (color != ambientColor) {
+            ambient.animate().alpha(0.35f).setDuration(200).withEndAction(() -> {
+                setAmbient(color);
+                ambient.animate().alpha(1f).setDuration(500).start();
+            }).start();
         }
     }
 
@@ -571,7 +815,6 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (!heroShown) return;
         heroShown = false;
         heroName.animate().alpha(0f).setDuration(160).start();
-        ambient.animate().alpha(0f).setDuration(300).start();
     }
 
     private void hideGlass() {
@@ -595,7 +838,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             return position % COLUMNS == COLUMNS - 1 || position == count - 1;
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            if (position < COLUMNS) return false;          // dock row: let focus move to the top bar
+            if (position < adapter.dockCount()) return false;   // dock row: let focus move to the top bar
             target = position - COLUMNS;
         } else {
             int lastRowStart = ((count - 1) / COLUMNS) * COLUMNS;
